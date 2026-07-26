@@ -13,6 +13,7 @@ Tijek rada:
      evidencija u ERACUN_PRIMKE. Upis stvarne primke (GASZG/GASST) dodaje
      se u sljedećem koraku razvoja.
 """
+import os
 import re
 import tkinter as tk
 from datetime import datetime
@@ -30,6 +31,24 @@ def hr_date(iso_date: str) -> str:
         return datetime.strptime(iso_date, "%Y-%m-%d").strftime("%d.%m.%Y")
     except (ValueError, TypeError):
         return iso_date or ""
+
+
+def parse_iso_date(iso_date: str) -> datetime:
+    """YYYY-MM-DD -> datetime objekt (za upis u TIMESTAMP kolone GASZG/GASST)."""
+    return datetime.strptime(iso_date, "%Y-%m-%d")
+
+
+def format_decimal(value: Decimal) -> str:
+    """
+    Formatira Decimal za prikaz bez suvišnih nula i BEZ znanstvene notacije.
+    Napomena: Decimal.normalize() zna prijeći na znanstvenu notaciju za
+    "okrugle" brojeve (npr. 180.00 -> 1.8E+2) - format(value, 'f') to
+    izbjegava (uvijek fiksni zapis), pa se suvišne nule ručno režu.
+    """
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 class StavkaRow:
@@ -85,10 +104,14 @@ class StavkaRow:
 
         ttk.Checkbutton(parent, variable=self.var_pov_nak, takefocus=False,
                          command=self.app.refresh_knjizi_state).grid(row=r, column=7)
-        ttk.Checkbutton(parent, variable=self.var_ne_unosi, takefocus=False,
-                         command=self._on_ne_unosi_toggle).grid(row=r, column=8)
+        self.chk_ne_unosi = ttk.Checkbutton(
+            parent, variable=self.var_ne_unosi, takefocus=False,
+            command=self._on_ne_unosi_toggle,
+        )
+        self.chk_ne_unosi.grid(row=r, column=8)
 
         self._apply_existing_veza()
+        self._update_ne_unosi_availability()
 
     _NUM_RE = re.compile(r"^\d*([.,]\d{0,2})?$")
 
@@ -112,6 +135,21 @@ class StavkaRow:
                 self.var_kolicina_ulaz.set(str(veza["kolrobe"]))
             self.var_pov_nak.set(veza["pov_nak"])
             self.var_ne_unosi.set(veza["ne_unosi"])
+
+    def _update_ne_unosi_availability(self):
+        """
+        "Ne unosi" smije biti označeno SAMO na retcima koji nisu mapirani na
+        artikl. Ako je redak mapiran (id_robe postavljen), checkbox se
+        onemogućuje i eventualno već postavljena kvačica se skida (spriječava
+        kontradiktorno stanje: mapiran artikl + "ne zaprimaj ovaj redak").
+        """
+        if self.id_robe is not None:
+            if self.var_ne_unosi.get():
+                self.var_ne_unosi.set(False)
+                self.app.refresh_knjizi_state()
+            self.chk_ne_unosi.config(state="disabled")
+        else:
+            self.chk_ne_unosi.config(state="normal")
 
     _IGNORE_KEYS = {
         "Up", "Down", "Left", "Right", "Return", "Escape", "Tab",
@@ -175,6 +213,7 @@ class StavkaRow:
         """Poziva App kad korisnik odabere stavku iz padajuće liste (klik ili Enter)."""
         self.var_naziv_artikla.set(naziv)
         self.id_robe = idrobe
+        self._update_ne_unosi_availability()
         self.app.refresh_knjizi_state()
 
     def _on_ne_unosi_toggle(self):
@@ -215,12 +254,13 @@ class App:
         self.root = root
         self.cfg = cfg
         self.root.title("Uvoz eRačuna u iSustav")
-        self.root.geometry("1050x680")
+        self.root.geometry("1050x750")
 
         self.id_posjed = None
         self.id_sklad = None
         self.id_tvrtke = None
         self.zaglavlje = None
+        self.xml_path = None
         self.rows = []
         self._posjed_map = {}
         self._sklad_map = {}
@@ -332,6 +372,14 @@ class App:
                 anchor="center", justify="center",
             ).grid(row=0, column=c, padx=1, pady=2, sticky="nsew")
 
+        totals_frame = ttk.Frame(self.root, padding=(10, 0))
+        totals_frame.pack(fill="x")
+        self.lbl_pov_nak_total = ttk.Label(
+            totals_frame, text="Povratna naknada ukupno: 0",
+            font=("TkDefaultFont", 9, "bold"),
+        )
+        self.lbl_pov_nak_total.pack(side="right", padx=(0, 25))
+
         bottom = ttk.Frame(self.root, padding=10)
         bottom.pack(fill="x")
         ttk.Button(bottom, text="Učitaj XML ...", command=self._on_ucitaj_xml).pack(side="left")
@@ -407,6 +455,13 @@ class App:
             messagebox.showerror("Greška u XML datoteci", str(e))
             return
 
+        if not db.firma_oib_postoji(self.conn, zaglavlje.oib_kupca):
+            messagebox.showerror(
+                "Pogrešan kupac",
+                f"Izabrana XML datoteka se odnosi na tvrtku {zaglavlje.naziv_kupca}",
+            )
+            return
+
         tvrtka = db.fetch_tvrtka_by_oib(self.conn, zaglavlje.oib_dobavljaca)
         if tvrtka is None:
             messagebox.showerror(
@@ -417,16 +472,20 @@ class App:
             return
         self.id_tvrtke, naziv_tvrtke = tvrtka
 
-        if db.eracun_vec_uvezen(self.conn, zaglavlje.ref_key):
+        postojeci_broj = db.fetch_broj_primke(self.conn, zaglavlje.ref_key)
+        if postojeci_broj is not None:
             nastavi = messagebox.askyesno(
-                "Račun je već uvezen",
-                "Ovaj račun je prema evidenciji već ranije uvezen.\n"
-                "Želite li ga svejedno učitati na formu?",
+                "Račun je već proknjižen",
+                f"XML datoteka koju učitavate je već proknjižena kao primka "
+                f"pod brojem {postojeci_broj}.\n\n"
+                f"Želite li je svejedno učitati na formu (bez mogućnosti "
+                f"ponovnog knjiženja)?",
             )
             if not nastavi:
                 return
 
         self.zaglavlje = zaglavlje
+        self.xml_path = path
         self.lbl_dobavljac.config(text=naziv_tvrtke)
         self.lbl_datum.config(text=hr_date(zaglavlje.datum_izdavanja))
         self.lbl_datum_zaprimanja.config(text=hr_date(zaglavlje.datum_zaprimanja))
@@ -449,19 +508,47 @@ class App:
     def refresh_knjizi_state(self):
         spreman = bool(self.rows) and all(r.is_complete() for r in self.rows)
         self.btn_knjizi.config(state="normal" if spreman else "disabled")
+        self._update_pov_nak_total()
+
+    def _update_pov_nak_total(self):
+        """
+        Zbraja XML količine (kolona "Kol.") svih redaka označenih "Povratna
+        naknada" i prikazuje ukupan zbroj ispod tablice.
+        """
+        ukupno = sum(
+            (r.stavka.kolicina for r in self.rows if r.var_pov_nak.get()),
+            Decimal("0"),
+        )
+        self.lbl_pov_nak_total.config(text=f"Povratna naknada ukupno: {format_decimal(ukupno)}")
 
     # ------------------------------------------------------------------
     # Knjiži
     # ------------------------------------------------------------------
     def _on_knjizi(self):
         """
-        Trenutna implementacija: sprema mapiranja u ERACUN_VEZE i evidenciju
-        u ERACUN_PRIMKE. Upis primke u GASZG/GASST dodat će se naknadno -
-        u istoj transakciji, prije commit-a, kad definiramo tu logiku.
+        Sprema mapiranja u ERACUN_VEZE i evidenciju u ERACUN_PRIMKE, te
+        upisuje primku u GASZG (zaglavlje) i GASST (stavke) - sve u jednoj
+        transakciji (commit na kraju, rollback ako bilo što pukne).
+
+        Napomena: cijene, iznosi i porezni izračuni u GASST NISU još
+        mapirani (dogovoreno da se rade u sljedećem koraku) - upisuju se
+        samo polja dogovorena za ovu fazu.
         """
         if self.id_posjed is None or self.id_sklad is None:
             messagebox.showwarning(
                 "Nedostaju podaci", "Odaberite poslovnicu i skladište prije knjiženja."
+            )
+            return
+
+        # Čvrsta provjera duplog knjiženja - ERACUN_PRIMKE zapis se upisuje u
+        # istoj transakciji kao GASZG/GASST, pa njegovo postojanje uvijek
+        # znači da je taj eRačun već stvarno proknjižen (ne samo učitan).
+        postojeci_broj = db.fetch_broj_primke(self.conn, self.zaglavlje.ref_key)
+        if postojeci_broj is not None:
+            messagebox.showerror(
+                "Račun je već proknjižen",
+                f"XML datoteka koju knjižite je već proknjižena kao primka "
+                f"pod brojem {postojeci_broj}.",
             )
             return
 
@@ -481,18 +568,85 @@ class App:
                     ne_unosi=row.var_ne_unosi.get(),
                 )
 
-            db.save_eracun_primka(self.conn, self.zaglavlje.ref_key, self.id_tvrtke)
+            # --- Upis primke: GASZG (zaglavlje) + GASST (stavke) ---
+            datdok = parse_iso_date(self.zaglavlje.datum_izdavanja)
+
+            idgaszg, brdok = db.insert_gaszg(
+                self.conn,
+                id_posjed=self.id_posjed,
+                id_sklad=self.id_sklad,
+                id_tvrtke=self.id_tvrtke,
+                sisuser=self.cfg.idsisuser,
+                datdok=datdok,
+                brotp=self.zaglavlje.broj_dokumenta,
+                oznplac=self.cfg.idtransakcijski,
+            )
+
+            db.save_eracun_primka(
+                self.conn, self.zaglavlje.ref_key, self.id_tvrtke, broj_primke=brdok
+            )
+
+            for row in self.rows:
+                if row.var_ne_unosi.get():
+                    continue
+                kol = row.stavka.kolicina * row.get_kolrobe()
+                fakcijena = row.stavka.cijena
+                fakiznos = row.stavka.kolicina * row.stavka.cijena
+                ambcijena = Decimal("0.1") if row.var_pov_nak.get() else Decimal("0")
+                db.insert_gasst(
+                    self.conn,
+                    id_gaszg=idgaszg,
+                    id_posjed=self.id_posjed,
+                    id_sklad=self.id_sklad,
+                    id_tvrtke=self.id_tvrtke,
+                    brdok=brdok,
+                    datdok=datdok,
+                    idosnrobe=row.id_robe,
+                    kol=kol,
+                    fakcijena=fakcijena,
+                    fakiznos=fakiznos,
+                    ulporpos=row.stavka.porez_posto,
+                    ambcijena=ambcijena,
+                )
+
             self.conn.commit()
 
+            self._rename_ucitani_xml()
+
             messagebox.showinfo(
-                "Mapiranja spremljena",
-                "Mapiranja artikala su spremljena, a račun je evidentiran kao uvezen.\n\n"
-                "Upis primke u iSustav bazu (GASZG/GASST) bit će dodan u sljedećem "
-                "koraku razvoja.",
+                "Primka knjižena",
+                f"Primka je uspješno knjižena (broj dokumenta {brdok}).",
             )
+            self._populate_grid([])  # isprazni tablicu - dokument je proknjižen
         except Exception as e:
             self.conn.rollback()
-            messagebox.showerror("Greška pri spremanju", str(e))
+            messagebox.showerror("Greška pri knjiženju", str(e))
+
+    def _rename_ucitani_xml(self):
+        """
+        Nakon uspješnog knjiženja, XML datoteci dodaje prefiks 'UCITANO-' u
+        nazivu (na disku, u istom folderu) - tako se već obrađene datoteke
+        abecedno spuštaju na dno foldera (nazivi su brojevi, 'U' je pri kraju
+        abecede). Greška pri preimenovanju NE poništava već uspješno
+        knjiženje - samo se korisniku prikaže upozorenje.
+        """
+        if not self.xml_path or not os.path.exists(self.xml_path):
+            return
+
+        directory, filename = os.path.split(self.xml_path)
+        if filename.startswith("UCITANO-"):
+            return  # već preimenovano (ne bi se smjelo dogoditi, ali za svaki slučaj)
+
+        novi_put = os.path.join(directory, f"UCITANO-{filename}")
+        try:
+            os.rename(self.xml_path, novi_put)
+            self.xml_path = novi_put
+        except OSError as e:
+            messagebox.showwarning(
+                "Preimenovanje nije uspjelo",
+                f"Primka je uspješno knjižena, ali XML datoteku nije bilo moguće "
+                f"preimenovati:\n{e}",
+            )
 
     # ------------------------------------------------------------------
     # Autocomplete popup za kolonu "Naziv artikla" (dijeljen među retcima)

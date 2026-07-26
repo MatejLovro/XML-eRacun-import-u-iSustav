@@ -23,12 +23,15 @@ class EracunStavka:
     naziv_dobavljaca: str
     kolicina: Decimal
     cijena: Decimal
+    porez_posto: Decimal = Decimal("0")  # cac:ClassifiedTaxCategory/cbc:Percent
 
 
 @dataclass
 class EracunZaglavlje:
     broj_dokumenta: str        # XML: cbc:ID (root)
     oib_dobavljaca: str        # XML: AccountingSupplierParty//cbc:CompanyID
+    oib_kupca: str             # XML: AccountingCustomerParty//cbc:CompanyID
+    naziv_kupca: str           # XML: AccountingCustomerParty//cbc:RegistrationName
     datum_izdavanja: str       # ISO YYYY-MM-DD, iz cbc:IssueDate
     datum_zaprimanja: str      # ISO YYYY-MM-DD, iz ActualDeliveryDate (ili IssueDate)
     ref_key: str                # jedinstveni ključ za ERACUN_PRIMKE (spr. dupli uvoz)
@@ -83,6 +86,16 @@ def parse_ubl_invoice(xml_path: str) -> EracunZaglavlje:
     if not oib:
         raise ValueError("Nije pronađen OIB dobavljača (cbc:CompanyID) u XML-u.")
 
+    customer = root.find("cac:AccountingCustomerParty", NS)
+    if customer is None:
+        raise ValueError("XML ne sadrži podatke o kupcu (cac:AccountingCustomerParty).")
+
+    oib_kupca = _normalize_oib(_text(customer.find(".//cbc:CompanyID", NS)))
+    if not oib_kupca:
+        raise ValueError("Nije pronađen OIB kupca (cbc:CompanyID) u XML-u.")
+
+    naziv_kupca = _text(customer.find(".//cbc:RegistrationName", NS))
+
     datum_izdavanja = _text(root.find("cbc:IssueDate", NS))
 
     datum_zaprimanja = _text(root.find(".//cac:Delivery/cbc:ActualDeliveryDate", NS))
@@ -98,6 +111,8 @@ def parse_ubl_invoice(xml_path: str) -> EracunZaglavlje:
     zaglavlje = EracunZaglavlje(
         broj_dokumenta=broj_dokumenta,
         oib_dobavljaca=oib,
+        oib_kupca=oib_kupca,
+        naziv_kupca=naziv_kupca,
         datum_izdavanja=datum_izdavanja,
         datum_zaprimanja=datum_zaprimanja,
         ref_key=ref_key,
@@ -109,9 +124,13 @@ def parse_ubl_invoice(xml_path: str) -> EracunZaglavlje:
         item = line.find("cac:Item", NS)
         sifra = ""
         naziv = ""
+        porez_posto = Decimal("0")
         if item is not None:
             sifra = _text(item.find("cac:SellersItemIdentification/cbc:ID", NS))
             naziv = _text(item.find("cbc:Name", NS))
+            tax_cat = item.find("cac:ClassifiedTaxCategory", NS)
+            if tax_cat is not None:
+                porez_posto = _decimal(_text(tax_cat.find("cbc:Percent", NS)))
 
         kol_el = line.find("cbc:InvoicedQuantity", NS)
         if kol_el is None:
@@ -127,6 +146,7 @@ def parse_ubl_invoice(xml_path: str) -> EracunZaglavlje:
                 naziv_dobavljaca=naziv,
                 kolicina=kolicina,
                 cijena=cijena,
+                porez_posto=porez_posto,
             )
         )
 

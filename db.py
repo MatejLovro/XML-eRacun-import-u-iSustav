@@ -38,8 +38,33 @@ def ensure_schema(conn: fdb.Connection) -> None:
     """
     _ensure_table_eracun_veze(conn)
     _ensure_table_eracun_primke(conn)
+    _ensure_column(conn, "ERACUN_PRIMKE", "BROJ_PRIMKE", "BIGINT")
     _ensure_sequence(conn, "GEN_ERACUN_VEZE_ID")
     _ensure_sequence(conn, "GEN_ERACUN_PRIMKE_ID")
+
+
+def _column_exists(conn: fdb.Connection, table_name: str, column_name: str) -> bool:
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM RDB$RELATION_FIELDS "
+        "WHERE RDB$RELATION_NAME = ? AND RDB$FIELD_NAME = ?",
+        (table_name.upper(), column_name.upper()),
+    )
+    return cur.fetchone() is not None
+
+
+def _ensure_column(conn: fdb.Connection, table_name: str, column_name: str, column_def: str) -> None:
+    """
+    Migracija za postojeće instalacije: ako tabela postoji ali joj nedostaje
+    kolona (npr. dodana u novijoj verziji aplikacije), doda je.
+    """
+    if not _table_exists(conn, table_name):
+        return  # tabela će se tek kreirati (s kolonom već uključenom) - vidi ensure_schema
+    if _column_exists(conn, table_name, column_name):
+        return
+    cur = conn.cursor()
+    cur.execute(f"ALTER TABLE {table_name} ADD {column_name} {column_def}")
+    conn.commit()
 
 
 def _table_exists(conn: fdb.Connection, table_name: str) -> bool:
@@ -131,6 +156,7 @@ def _ensure_table_eracun_primke(conn: fdb.Connection) -> None:
           ID                BIGINT                 NOT NULL
         , REF_KEY_ERACUN    VARCHAR( 50 )
         , IDKUPCA           BIGINT                 NOT NULL
+        , BROJ_PRIMKE       BIGINT
         , CONSTRAINT ERP_ID
             PRIMARY KEY ( ID )
         )
@@ -183,6 +209,17 @@ def fetch_tvrtka_by_oib(conn: fdb.Connection, oib: str) -> Optional[Tuple[int, s
     cur = conn.cursor()
     cur.execute("SELECT IDTVRTKE, NAZIV1 FROM TVRTKE WHERE OIB = ?", (oib,))
     return cur.fetchone()
+
+
+def firma_oib_postoji(conn: fdb.Connection, oib: str) -> bool:
+    """
+    Provjerava odgovara li zadani OIB (kupca s eRačuna) OIB-u korisnika
+    aplikacije, upisanom u FB.FIRME.OIB - sprječava učitavanje eRačuna
+    koji je namijenjen nekom drugom kupcu/subjektu.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM FIRME WHERE OIB = ?", (oib,))
+    return cur.fetchone() is not None
 
 
 # ---------------------------------------------------------------------------
@@ -316,10 +353,26 @@ def eracun_vec_uvezen(conn: fdb.Connection, ref_key: str) -> bool:
     return cur.fetchone() is not None
 
 
-def save_eracun_primka(conn: fdb.Connection, ref_key: str, id_kupca: int) -> None:
+def fetch_broj_primke(conn: fdb.Connection, ref_key: str) -> Optional[int]:
     """
-    Upisuje evidenciju da je račun uvezen. NE commita - poziva se unutar
-    iste transakcije kao i save_veza() pozivi, pri kliku na Knjiži.
+    Vraća BROJ_PRIMKE (=BRDOK pod kojim je proknjižena) za zadani
+    REF_KEY_ERACUN, ili None ako taj eRačun još nije proknjižen.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT BROJ_PRIMKE FROM ERACUN_PRIMKE WHERE REF_KEY_ERACUN = ?",
+        (ref_key,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def save_eracun_primka(conn: fdb.Connection, ref_key: str, id_kupca: int, broj_primke: int) -> None:
+    """
+    Upisuje evidenciju da je račun uvezen/proknjižen, zajedno s brojem
+    primke (BRDOK) pod kojim je proknjižen. NE commita - poziva se unutar
+    iste transakcije kao i save_veza()/insert_gaszg()/insert_gasst() pozivi,
+    pri kliku na Knjiži.
 
     Napomena: koristi sekvencu GEN_ERACUN_PRIMKE_ID koju treba kreirati:
         CREATE SEQUENCE GEN_ERACUN_PRIMKE_ID;
@@ -328,6 +381,183 @@ def save_eracun_primka(conn: fdb.Connection, ref_key: str, id_kupca: int) -> Non
     cur.execute("SELECT NEXT VALUE FOR GEN_ERACUN_PRIMKE_ID FROM RDB$DATABASE")
     new_id = cur.fetchone()[0]
     cur.execute(
-        "INSERT INTO ERACUN_PRIMKE (ID, REF_KEY_ERACUN, IDKUPCA) VALUES (?, ?, ?)",
-        (new_id, ref_key, id_kupca),
+        "INSERT INTO ERACUN_PRIMKE (ID, REF_KEY_ERACUN, IDKUPCA, BROJ_PRIMKE) VALUES (?, ?, ?, ?)",
+        (new_id, ref_key, id_kupca, broj_primke),
     )
+
+
+# ---------------------------------------------------------------------------
+# Modul C: Upis primke u GASZG (zaglavlje) / GASST (stavke)
+#
+# VK=408 je fiksna oznaka tipa dokumenta "primka po eRačunu" (dogovoreno).
+# IDGASZG/IDGASST se generiraju preko postojećih generatora GENIDDOKZG i
+# GENIDDOKST (potvrđeno da odgovaraju MAX(IDGASZG)/MAX(IDGASST) u bazi).
+# BRDOK (broj dokumenta) NIJE iz generatora - MAX(BRDOK)+1 za VK=408, unutar
+# iste transakcije kao ostatak knjiženja.
+# ---------------------------------------------------------------------------
+
+VK_PRIMKA_ERACUN = 408
+
+
+def _next_generator_value(conn: fdb.Connection, generator_name: str) -> int:
+    """Dohvaća sljedeću vrijednost imenovanog Firebird generatora."""
+    cur = conn.cursor()
+    cur.execute(f"SELECT GEN_ID({generator_name}, 1) FROM RDB$DATABASE")
+    return cur.fetchone()[0]
+
+
+def _next_brdok(conn: fdb.Connection, vk: int) -> int:
+    """
+    Sljedeći broj dokumenta (BRDOK) za zadani VK - MAX(BRDOK)+1.
+    Napomena: nije zaštićeno od utrke uvjeta (race condition) kod istovremenog
+    knjiženja od strane više korisnika - za sada prihvaćeno, ista transakcija
+    kao i ostatak knjiženja donekle štiti.
+    """
+    cur = conn.cursor()
+    cur.execute("SELECT MAX(BRDOK) FROM GASZG WHERE VK = ?", (vk,))
+    row = cur.fetchone()
+    trenutni_max = row[0] if row and row[0] is not None else 0
+    return trenutni_max + 1
+
+
+def fetch_ulporgr(conn: fdb.Connection, idosnrobe: int) -> Optional[str]:
+    """Dohvaća poreznu grupu artikla (FB.OSNROBA.ULPORGR) - koristi se za GASST.SIFPORGR."""
+    cur = conn.cursor()
+    cur.execute("SELECT ULPORGR FROM OSNROBA WHERE IDOSNROBE = ?", (idosnrobe,))
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def insert_gaszg(
+    conn: fdb.Connection,
+    *,
+    id_posjed: int,
+    id_sklad: int,
+    id_tvrtke: int,
+    sisuser: int,
+    datdok,
+    brotp: str,
+    oznplac: int,
+) -> Tuple[int, int]:
+    """
+    Upisuje zaglavlje primke u GASZG. Vraća (idgaszg, brdok).
+    NE commita - poziva se unutar iste transakcije kao ostatak knjiženja
+    (ERACUN_VEZE/ERACUN_PRIMKE i GASST stavke).
+
+    Mapiranje polja (dogovoreno):
+      IDGASZG = GEN_ID(GENIDDOKZG, 1)
+      SISUSER = param.ini [primka] idsisuser
+      SISDATE = CURRENT_TIMESTAMP
+      VK = 408 (fiksno)
+      BRDOK = MAX(BRDOK)+1 za VK=408
+      DATDOK/DVO/DATVAL = datum izdavanja iz XML-a (isti za sva tri polja)
+      BROTP = broj računa dobavljača iz XML-a (korijenski cbc:ID)
+      OZNPLAC = param.ini [primka] idtransakcijski
+      DOKZAKNJIGU/IDPJZAKNJIGU = BRDOK
+      STORNO='F', UPISANO='T', KNJIZENO='T'
+      POROSN, PORODBI, PORNEODBI, TROSPOS, TROSIZN, IZNOS = 0 (dogovoreno)
+    """
+    vk = VK_PRIMKA_ERACUN
+    idgaszg = _next_generator_value(conn, "GENIDDOKZG")
+    brdok = _next_brdok(conn, vk)
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO GASZG (
+            IDGASZG, SISUSER, SISDATE, IDPOSJED, IDSKLAD, VK, BRDOK, IDTVRTKE,
+            DATDOK, DVO, DATVAL, BROTP, OZNPLAC, DOKZAKNJIGU, IDPJZAKNJIGU,
+            POROSN, PORODBI, PORNEODBI, TROSPOS, TROSIZN, IZNOS,
+            STORNO, UPISANO, KNJIZENO
+        ) VALUES (
+            ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?,
+            0, 0, 0, 0, 0, 0,
+            'F', 'T', 'T'
+        )
+        """,
+        (
+            idgaszg, sisuser, id_posjed, id_sklad, vk, brdok, id_tvrtke,
+            datdok, datdok, datdok, brotp, oznplac, brdok, brdok,
+        ),
+    )
+    return idgaszg, brdok
+
+
+def insert_gasst(
+    conn: fdb.Connection,
+    *,
+    id_gaszg: int,
+    id_posjed: int,
+    id_sklad: int,
+    id_tvrtke: int,
+    brdok: int,
+    datdok,
+    idosnrobe: int,
+    kol: Decimal,
+    fakcijena: Decimal,
+    fakiznos: Decimal,
+    ulporpos: Decimal,
+    ambcijena: Decimal,
+) -> int:
+    """
+    Upisuje jednu stavku primke u GASST. Vraća idgasst. NE commita.
+
+    Mapiranje polja (dogovoreno):
+      IDGASZG = FK na upravo kreirano zaglavlje
+      IDGASST = GEN_ID(GENIDDOKST, 1)
+      IDOSNROBE = interni artikl mapiran u koloni "Naziv artikla"
+      IDPOSJED/IDSKLAD/IDTVRTKE/BRDOK/DATDOK = isto kao u zaglavlju (GASZG)
+      VK = 408 (fiksno)
+      KOL = XML količina (Kol.) * "Količina mjere" (izračunato prije poziva)
+      FAKCIJENA = cac:Price/cbc:PriceAmount iz XML-a (već nakon rabata)
+      FAKIZNOS = XML InvoicedQuantity * PriceAmount (izračunato prije poziva)
+      RABPOS = 0 (uvijek, dogovoreno)
+      ULPORPOS = cac:ClassifiedTaxCategory/cbc:Percent iz XML-a
+      IZPORPOS = ista vrijednost kao ULPORPOS (dogovoreno)
+      NABCIJENA = ista vrijednost kao FAKCIJENA (dogovoreno)
+      NABIZNOS = ista vrijednost kao FAKIZNOS (dogovoreno)
+      MARPOS = -100 (uvijek, dogovoreno - kod primki)
+      AMBCIJENA = 0.1 ako je redak označen "Povratna naknada", inače 0
+      SIFPORGR = FB.OSNROBA.ULPORGR za taj artikl (NOT NULL u bazi - ako
+                 artikl nema postavljenu ULPORGR, baca ValueError)
+
+    Ostala polja (TROSARINA, RABPOS2, POTCIJENA, PRODCIJENA, KOLZADUZENO,
+    KOLPRIM, KOLSTANJE, KOLINV, PROSCIJENA i sl.) NISU još mapirana -
+    dogovoreno da se rade u sljedećem koraku.
+    """
+    vk = VK_PRIMKA_ERACUN
+    rabpos = Decimal("0")
+    marpos = Decimal("-100")
+    izporpos = ulporpos           # dogovoreno: ista vrijednost kao ULPORPOS
+    nabcijena = fakcijena         # dogovoreno: ista vrijednost kao FAKCIJENA
+    nabiznos = fakiznos           # dogovoreno: ista vrijednost kao FAKIZNOS
+
+    sifporgr = fetch_ulporgr(conn, idosnrobe)
+    if sifporgr is None:
+        raise ValueError(
+            f"Artikl (IDOSNROBE={idosnrobe}) nema postavljenu poreznu grupu "
+            f"(FB.OSNROBA.ULPORGR) - nije moguće odrediti GASST.SIFPORGR."
+        )
+
+    idgasst = _next_generator_value(conn, "GENIDDOKST")
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO GASST (
+            IDGASZG, IDGASST, IDOSNROBE, IDPOSJED, IDSKLAD, VK, BRDOK, DATDOK,
+            IDTVRTKE, KOL, FAKCIJENA, FAKIZNOS, RABPOS, ULPORPOS, IZPORPOS,
+            NABCIJENA, NABIZNOS, MARPOS, AMBCIJENA, SIFPORGR
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            id_gaszg, idgasst, idosnrobe, id_posjed, id_sklad, vk, brdok, datdok,
+            id_tvrtke, kol, fakcijena, fakiznos, rabpos, ulporpos, izporpos,
+            nabcijena, nabiznos, marpos, ambcijena, sifporgr,
+        ),
+    )
+    return idgasst
