@@ -17,7 +17,7 @@ import os
 import re
 import tkinter as tk
 from datetime import datetime
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from tkinter import filedialog, messagebox, ttk
 
 import db
@@ -74,7 +74,8 @@ class StavkaRow:
             row=r, column=2, sticky="nsew", padx=1, pady=1)
         ttk.Label(parent, text=str(stavka.kolicina), width=8, anchor="e").grid(
             row=r, column=3, sticky="nsew", padx=1, pady=1)
-        ttk.Label(parent, text=str(stavka.cijena), width=8, anchor="e").grid(
+        cijena_prikaz = stavka.cijena.quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+        ttk.Label(parent, text=str(cijena_prikaz), width=8, anchor="e").grid(
             row=r, column=4, sticky="nsew", padx=1, pady=1)
 
         # Obično Entry polje umjesto ttk.Combobox - padajuću listu prikazujemo
@@ -591,8 +592,8 @@ class App:
                     continue
                 kol = row.stavka.kolicina * row.get_kolrobe()
                 fakcijena = row.stavka.cijena
-                fakiznos = row.stavka.kolicina * row.stavka.cijena
-                ambcijena = Decimal("0.1") if row.var_pov_nak.get() else Decimal("0")
+                fakiznos = row.stavka.iznos_retka  # autoritativan (cbc:LineExtensionAmount), ne kolicina*cijena
+                ambcijena = self.cfg.povratna_naknada if row.var_pov_nak.get() else Decimal("0")
                 db.insert_gasst(
                     self.conn,
                     id_gaszg=idgaszg,

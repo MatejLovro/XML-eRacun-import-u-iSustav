@@ -23,6 +23,13 @@ class EracunStavka:
     naziv_dobavljaca: str
     kolicina: Decimal
     cijena: Decimal
+    # NETO jedinična cijena NAKON rabata - izvedena iz iznos_retka/kolicina,
+    # NE čita se izravno iz cac:Price/PriceAmount. Razlog: PriceAmount se
+    # pokazao nepouzdan - u istoj XML datoteci, kod nekih redaka predstavlja
+    # cijenu PRIJE rabata, a kod drugih NAKON rabata (nekonzistentnost u
+    # softveru dobavljača). LineExtensionAmount je autoritativan (uvijek
+    # "konačni" neto iznos retka), pa se cijena uvijek izvodi iz njega.
+    iznos_retka: Decimal = Decimal("0")  # cbc:LineExtensionAmount (autoritativan)
     porez_posto: Decimal = Decimal("0")  # cac:ClassifiedTaxCategory/cbc:Percent
 
 
@@ -137,7 +144,15 @@ def parse_ubl_invoice(xml_path: str) -> EracunZaglavlje:
             kol_el = line.find("cbc:BaseQuantity", NS)
         kolicina = _decimal(_text(kol_el))
 
-        cijena = _decimal(_text(line.find("cac:Price/cbc:PriceAmount", NS)))
+        iznos_retka = _decimal(_text(line.find("cbc:LineExtensionAmount", NS)))
+
+        if kolicina != 0:
+            cijena = iznos_retka / kolicina
+        else:
+            # rubni slucaj (kolicina 0 na retku) - nemamo iz cega izvesti
+            # jedinicnu cijenu, pa kao krajnju rezervu koristimo sirovi
+            # PriceAmount (ako ga uopce ima)
+            cijena = _decimal(_text(line.find("cac:Price/cbc:PriceAmount", NS)))
 
         zaglavlje.stavke.append(
             EracunStavka(
@@ -146,6 +161,7 @@ def parse_ubl_invoice(xml_path: str) -> EracunZaglavlje:
                 naziv_dobavljaca=naziv,
                 kolicina=kolicina,
                 cijena=cijena,
+                iznos_retka=iznos_retka,
                 porez_posto=porez_posto,
             )
         )

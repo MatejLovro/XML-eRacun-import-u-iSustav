@@ -9,6 +9,7 @@ korisniku kao pop-up poruku.
 import configparser
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 
 @dataclass
@@ -22,6 +23,7 @@ class Config:
     charset: str
     idsisuser: int          # FB.KORISNICI.IDKOR - upisuje se kod knjiženja primke
     idtransakcijski: int    # koristi se kod knjiženja primke (GASZG/GASST)
+    povratna_naknada: Decimal  # iznos povratne naknade (GASST.AMBCIJENA)
 
 
 def load_config(ini_path: str = "param.ini") -> Config:
@@ -46,14 +48,40 @@ def load_config(ini_path: str = "param.ini") -> Config:
 
     database = os.path.join(dir_fdb, fdb_file)
 
-    primka_sec = parser["primka"] if "primka" in parser else {}
+    povratna_naknada_text = sec.get("povratna_naknada", "0.1").strip().replace(",", ".")
     try:
-        idsisuser = int(primka_sec.get("idsisuser", "0"))
-        idtransakcijski = int(primka_sec.get("idtransakcijski", "0"))
-    except ValueError:
+        povratna_naknada = Decimal(povratna_naknada_text)
+    except InvalidOperation:
         raise ValueError(
-            "Parametri 'idsisuser' i 'idtransakcijski' u sekciji [primka] "
-            "moraju biti cijeli brojevi."
+            f"Parametar 'povratna_naknada' u sekciji [firebird] mora biti broj "
+            f"(trenutna vrijednost '{povratna_naknada_text}' nije valjan broj)."
+        )
+
+    if "primka" not in parser:
+        raise ValueError(
+            "Sekcija [primka] nije pronađena u param.ini datoteci. Dodajte:\n\n"
+            "[primka]\n"
+            "idsisuser=<ID korisnika iz FB.KORISNICI.IDKOR>\n"
+            "idtransakcijski=<ID transakcijske oznake>"
+        )
+    primka_sec = parser["primka"]
+
+    try:
+        idsisuser = int(primka_sec.get("idsisuser", "").strip())
+        idtransakcijski = int(primka_sec.get("idtransakcijski", "").strip())
+    except (ValueError, AttributeError):
+        raise ValueError(
+            "Parametri 'idsisuser' i 'idtransakcijski' u sekciji [primka] moraju "
+            "biti postavljeni i biti cijeli brojevi (provjerite nedostaje li "
+            "koji od njih, ili ima tipfeler u nazivu)."
+        )
+
+    if idsisuser <= 0:
+        raise ValueError(
+            "Parametar 'idsisuser' u sekciji [primka] mora biti pozitivan broj "
+            "(ID stvarnog korisnika iz FB.KORISNICI.IDKOR) - trenutna vrijednost "
+            f"je {idsisuser}, što bi kod knjiženja izazvalo grešku FK ograničenja "
+            "na GASZG.SISUSER."
         )
 
     return Config(
@@ -66,4 +94,5 @@ def load_config(ini_path: str = "param.ini") -> Config:
         charset=sec.get("charset", "WIN1250").strip(),
         idsisuser=idsisuser,
         idtransakcijski=idtransakcijski,
+        povratna_naknada=povratna_naknada,
     )
