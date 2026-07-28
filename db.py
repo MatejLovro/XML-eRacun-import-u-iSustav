@@ -495,8 +495,12 @@ def insert_gasst(
     datdok,
     idosnrobe: int,
     kol: Decimal,
+    kolzaduzeno: Decimal,
+    kolprim: Decimal,
     fakcijena: Decimal,
     fakiznos: Decimal,
+    nabcijena: Decimal,
+    nabiznos: Decimal,
     ulporpos: Decimal,
     ambcijena: Decimal,
 ) -> int:
@@ -510,28 +514,32 @@ def insert_gasst(
       IDPOSJED/IDSKLAD/IDTVRTKE/BRDOK/DATDOK = isto kao u zaglavlju (GASZG)
       VK = 408 (fiksno)
       KOL = XML količina (Kol.) * "Količina mjere" (izračunato prije poziva)
-      FAKCIJENA = cac:Price/cbc:PriceAmount iz XML-a (već nakon rabata)
-      FAKIZNOS = XML InvoicedQuantity * PriceAmount (izračunato prije poziva)
+      KOLZADUZENO = "Kol." kolona s forme (sirova XML količina, npr. broj boca)
+      KOLPRIM = "Količina mjere" kolona s forme (faktor pretvorbe)
+      FAKCIJENA = izvedeno iz cbc:LineExtensionAmount / KOL, zaokruženo na 3 decimale
+      FAKIZNOS = cbc:LineExtensionAmount (autoritativno iz XML-a)
       RABPOS = 0 (uvijek, dogovoreno)
       ULPORPOS = cac:ClassifiedTaxCategory/cbc:Percent iz XML-a
       IZPORPOS = ista vrijednost kao ULPORPOS (dogovoreno)
-      NABCIJENA = ista vrijednost kao FAKCIJENA (dogovoreno)
-      NABIZNOS = ista vrijednost kao FAKIZNOS (dogovoreno)
+      NABIZNOS = FAKIZNOS + (KOLZADUZENO * povratna_naknada) ako je redak
+                 označen "Povratna naknada" (naknada se plaća PO KOMADU
+                 AMBALAŽE - tj. po "Kol." s forme, NE po GASST.KOL koji je
+                 već pretvoren u konačnu jedinicu mjere, npr. litre)
+      NABCIJENA = NABIZNOS / KOL, zaokruženo na 4 decimale
       MARPOS = -100 (uvijek, dogovoreno - kod primki)
-      AMBCIJENA = 0.1 ako je redak označen "Povratna naknada", inače 0
+      AMBCIJENA = iznos parametra povratna_naknada ako je redak označen
+                  "Povratna naknada", inače 0
       SIFPORGR = FB.OSNROBA.ULPORGR za taj artikl (NOT NULL u bazi - ako
                  artikl nema postavljenu ULPORGR, baca ValueError)
 
-    Ostala polja (TROSARINA, RABPOS2, POTCIJENA, PRODCIJENA, KOLZADUZENO,
-    KOLPRIM, KOLSTANJE, KOLINV, PROSCIJENA i sl.) NISU još mapirana -
-    dogovoreno da se rade u sljedećem koraku.
+    Ostala polja (TROSARINA, RABPOS2, POTCIJENA, PRODCIJENA, KOLSTANJE,
+    KOLINV, PROSCIJENA i sl.) NISU još mapirana - dogovoreno da se rade u
+    sljedećem koraku.
     """
     vk = VK_PRIMKA_ERACUN
     rabpos = Decimal("0")
     marpos = Decimal("-100")
     izporpos = ulporpos           # dogovoreno: ista vrijednost kao ULPORPOS
-    nabcijena = fakcijena         # dogovoreno: ista vrijednost kao FAKCIJENA
-    nabiznos = fakiznos           # dogovoreno: ista vrijednost kao FAKIZNOS
 
     sifporgr = fetch_ulporgr(conn, idosnrobe)
     if sifporgr is None:
@@ -546,18 +554,18 @@ def insert_gasst(
         """
         INSERT INTO GASST (
             IDGASZG, IDGASST, IDOSNROBE, IDPOSJED, IDSKLAD, VK, BRDOK, DATDOK,
-            IDTVRTKE, KOL, FAKCIJENA, FAKIZNOS, RABPOS, ULPORPOS, IZPORPOS,
-            NABCIJENA, NABIZNOS, MARPOS, AMBCIJENA, SIFPORGR
+            IDTVRTKE, KOL, KOLZADUZENO, KOLPRIM, FAKCIJENA, FAKIZNOS, RABPOS,
+            ULPORPOS, IZPORPOS, NABCIJENA, NABIZNOS, MARPOS, AMBCIJENA, SIFPORGR
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?
         )
         """,
         (
             id_gaszg, idgasst, idosnrobe, id_posjed, id_sklad, vk, brdok, datdok,
-            id_tvrtke, kol, fakcijena, fakiznos, rabpos, ulporpos, izporpos,
-            nabcijena, nabiznos, marpos, ambcijena, sifporgr,
+            id_tvrtke, kol, kolzaduzeno, kolprim, fakcijena, fakiznos, rabpos,
+            ulporpos, izporpos, nabcijena, nabiznos, marpos, ambcijena, sifporgr,
         ),
     )
     return idgasst

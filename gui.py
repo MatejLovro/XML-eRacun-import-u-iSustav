@@ -590,10 +590,37 @@ class App:
             for row in self.rows:
                 if row.var_ne_unosi.get():
                     continue
-                kol = row.stavka.kolicina * row.get_kolrobe()
-                fakcijena = row.stavka.cijena
-                fakiznos = row.stavka.iznos_retka  # autoritativan (cbc:LineExtensionAmount), ne kolicina*cijena
-                ambcijena = self.cfg.povratna_naknada if row.var_pov_nak.get() else Decimal("0")
+                kolzaduzeno = row.stavka.kolicina   # "Kol." kolona s forme (sirova XML kolicina)
+                kolprim = row.get_kolrobe()          # "Kolicina mjere" kolona s forme
+                kol = kolzaduzeno * kolprim
+                fakiznos = row.stavka.iznos_retka  # autoritativan (cbc:LineExtensionAmount)
+
+                # FAKCIJENA = jedinična cijena PO GASST.KOL (jedinici mjere u
+                # koju se artikl zaprima - npr. litra), NE po sirovoj XML
+                # količini. KOL već uključuje pretvorbu preko "Količine mjere"
+                # (npr. 1 boca x 0,7 = 0,7 litara), pa je FAKIZNOS/KOL ispravna
+                # jedinična cijena (npr. 18,89 / 0,7 = 26,986 po litri).
+                # Zaokružuje se na 3 decimale prije upisa u bazu.
+                if kol != 0:
+                    fakcijena = (fakiznos / kol).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
+                else:
+                    fakcijena = Decimal("0")
+
+                ima_pov_nak = row.var_pov_nak.get()
+                ambcijena = self.cfg.povratna_naknada if ima_pov_nak else Decimal("0")
+
+                # NABIZNOS = fakturirani iznos, uvećan za povratnu naknadu SAMO
+                # ako je redak označen "Povratna naknada". Naknada se plaća PO
+                # KOMADU AMBALAŽE (= "Kol." s forme, npr. broj boca), NE po
+                # GASST.KOL (koji je već pretvoren u litre/konačnu jedinicu).
+                nabiznos = fakiznos + (kolzaduzeno * self.cfg.povratna_naknada) if ima_pov_nak else fakiznos
+
+                # NABCIJENA = NABIZNOS / KOL, zaokruženo na 4 decimale.
+                if kol != 0:
+                    nabcijena = (nabiznos / kol).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                else:
+                    nabcijena = Decimal("0")
+
                 db.insert_gasst(
                     self.conn,
                     id_gaszg=idgaszg,
@@ -604,8 +631,12 @@ class App:
                     datdok=datdok,
                     idosnrobe=row.id_robe,
                     kol=kol,
+                    kolzaduzeno=kolzaduzeno,
+                    kolprim=kolprim,
                     fakcijena=fakcijena,
                     fakiznos=fakiznos,
+                    nabcijena=nabcijena,
+                    nabiznos=nabiznos,
                     ulporpos=row.stavka.porez_posto,
                     ambcijena=ambcijena,
                 )
