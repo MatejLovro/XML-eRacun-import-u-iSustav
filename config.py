@@ -24,6 +24,7 @@ class Config:
     idsisuser: int          # FB.KORISNICI.IDKOR - upisuje se kod knjiženja primke
     idtransakcijski: int    # koristi se kod knjiženja primke (GASZG/GASST)
     povratna_naknada: Decimal  # iznos povratne naknade (GASST.AMBCIJENA)
+    nije_obveznik_pdv: bool    # ako True, cijena artikla se uvecava za PDV
 
 
 def load_config(ini_path: str = "param.ini") -> Config:
@@ -56,6 +57,9 @@ def load_config(ini_path: str = "param.ini") -> Config:
             f"Parametar 'povratna_naknada' u sekciji [firebird] mora biti broj "
             f"(trenutna vrijednost '{povratna_naknada_text}' nije valjan broj)."
         )
+
+    # T/F konvencija (kao Firebird CHAR(1) 'T'/'F' polja), case-insensitive
+    nije_obveznik_pdv = sec.get("nije_obveznik_PDV", "F").strip().upper() in ("T", "TRUE", "1", "DA")
 
     if "primka" not in parser:
         raise ValueError(
@@ -95,4 +99,5 @@ def load_config(ini_path: str = "param.ini") -> Config:
         idsisuser=idsisuser,
         idtransakcijski=idtransakcijski,
         povratna_naknada=povratna_naknada,
+        nije_obveznik_pdv=nije_obveznik_pdv,
     )

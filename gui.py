@@ -487,12 +487,35 @@ class App:
 
         self.zaglavlje = zaglavlje
         self.xml_path = path
+
+        if self.cfg.nije_obveznik_pdv:
+            self._primijeni_pdv_uvecanje(zaglavlje.stavke)
+
         self.lbl_dobavljac.config(text=naziv_tvrtke)
         self.lbl_datum.config(text=hr_date(zaglavlje.datum_izdavanja))
         self.lbl_datum_zaprimanja.config(text=hr_date(zaglavlje.datum_zaprimanja))
         self.lbl_broj_dok.config(text=zaglavlje.broj_dokumenta)
 
         self._populate_grid(zaglavlje.stavke)
+
+    @staticmethod
+    def _primijeni_pdv_uvecanje(stavke):
+        """
+        Za korisnike koji NISU obveznici PDV-a (param.ini [firebird]
+        nije_obveznik_PDV=T), cijena/iznos artikla se uvećavaju za PDV -
+        PDV za njih postaje stvarni trošak (ne mogu ga odbiti), pa mora ući
+        u nabavnu vrijednost. Mijenja stavka.iznos_retka i stavka.cijena
+        IN-PLACE (LineExtensionAmount postaje bruto umjesto neto iznos) -
+        sav daljnji izračun (FAKIZNOS, FAKCIJENA, NABIZNOS, NABCIJENA) već
+        koristi te vrijednosti, pa ne treba nikakvu dodatnu izmjenu logike
+        knjiženja.
+        """
+        for s in stavke:
+            faktor = Decimal("1") + (s.porez_posto / Decimal("100"))
+            s.iznos_retka = (s.iznos_retka * faktor).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            s.cijena = s.cijena * faktor
 
     def _populate_grid(self, stavke):
         self.hide_autocomplete()

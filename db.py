@@ -515,6 +515,8 @@ def insert_gasst(
       VK = 408 (fiksno)
       KOL = XML količina (Kol.) * "Količina mjere" (izračunato prije poziva)
       KOLZADUZENO = "Kol." kolona s forme (sirova XML količina, npr. broj boca)
+      KOLSTANJE = ista vrijednost kao KOLZADUZENO (dogovoreno)
+      KOLINV = ista vrijednost kao KOLZADUZENO (dogovoreno)
       KOLPRIM = "Količina mjere" kolona s forme (faktor pretvorbe)
       FAKCIJENA = izvedeno iz cbc:LineExtensionAmount / KOL, zaokruženo na 3 decimale
       FAKIZNOS = cbc:LineExtensionAmount (autoritativno iz XML-a)
@@ -532,9 +534,8 @@ def insert_gasst(
       SIFPORGR = FB.OSNROBA.ULPORGR za taj artikl (NOT NULL u bazi - ako
                  artikl nema postavljenu ULPORGR, baca ValueError)
 
-    Ostala polja (TROSARINA, RABPOS2, POTCIJENA, PRODCIJENA, KOLSTANJE,
-    KOLINV, PROSCIJENA i sl.) NISU još mapirana - dogovoreno da se rade u
-    sljedećem koraku.
+    Ostala polja (TROSARINA, RABPOS2, POTCIJENA, PRODCIJENA, PROSCIJENA i sl.)
+    NISU još mapirana - dogovoreno da se rade u sljedećem koraku.
     """
     vk = VK_PRIMKA_ERACUN
     rabpos = Decimal("0")
@@ -554,18 +555,21 @@ def insert_gasst(
         """
         INSERT INTO GASST (
             IDGASZG, IDGASST, IDOSNROBE, IDPOSJED, IDSKLAD, VK, BRDOK, DATDOK,
-            IDTVRTKE, KOL, KOLZADUZENO, KOLPRIM, FAKCIJENA, FAKIZNOS, RABPOS,
-            ULPORPOS, IZPORPOS, NABCIJENA, NABIZNOS, MARPOS, AMBCIJENA, SIFPORGR
+            IDTVRTKE, KOL, KOLZADUZENO, KOLPRIM, KOLSTANJE, KOLINV, FAKCIJENA,
+            FAKIZNOS, RABPOS, ULPORPOS, IZPORPOS, NABCIJENA, NABIZNOS, MARPOS,
+            AMBCIJENA, SIFPORGR
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?,
+            ?, ?
         )
         """,
         (
             id_gaszg, idgasst, idosnrobe, id_posjed, id_sklad, vk, brdok, datdok,
-            id_tvrtke, kol, kolzaduzeno, kolprim, fakcijena, fakiznos, rabpos,
-            ulporpos, izporpos, nabcijena, nabiznos, marpos, ambcijena, sifporgr,
+            id_tvrtke, kol, kolzaduzeno, kolprim, kolzaduzeno, kolzaduzeno, fakcijena,
+            fakiznos, rabpos, ulporpos, izporpos, nabcijena, nabiznos, marpos,
+            ambcijena, sifporgr,
         ),
     )
     return idgasst
