@@ -173,6 +173,7 @@ class StavkaRow:
         if event.keysym in self._IGNORE_KEYS:
             return
         self.id_robe = None  # dok korisnik ne odabere iz padajuće liste, artikl nije mapiran
+        self._update_ne_unosi_availability()  # ponovno omogući "Ne unosi" (redak više nije mapiran)
         self._run_search(self.var_naziv_artikla.get().strip())
         self.app.refresh_knjizi_state()
 
