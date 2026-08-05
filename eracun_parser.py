@@ -32,6 +32,20 @@ class EracunStavka:
     iznos_retka: Decimal = Decimal("0")  # cbc:LineExtensionAmount (autoritativan)
     porez_posto: Decimal = Decimal("0")  # cac:ClassifiedTaxCategory/cbc:Percent
 
+    @property
+    def kljuc_mapiranja(self) -> str:
+        """
+        Ključ za pretragu/spremanje u FB.ERACUN_VEZE (SIFRA_ROBE_DOBAVLJACA,
+        VARCHAR(30)). Neki dobavljači ne šalju cac:SellersItemIdentification
+        (šifra artikla) uopće - u tom slučaju bi svi njihovi artikli imali
+        prazan string kao "šifru", pa bi se pogrešno stapali u isto
+        mapiranje. Kao zamjenski ključ koristimo naziv artikla (skraćen na
+        30 znakova) - nije savršeno (dva artikla s identičnim prvih 30
+        znakova naziva bi se sudarila, a promjena naziva između računa
+        prekida prepoznavanje), ali je bitno bolje od praznog stringa.
+        """
+        return self.sifra_dobavljaca or self.naziv_dobavljaca[:30]
+
 
 @dataclass
 class EracunZaglavlje:

@@ -367,6 +367,28 @@ def fetch_broj_primke(conn: fdb.Connection, ref_key: str) -> Optional[int]:
     return row[0] if row else None
 
 
+def fetch_rucno_unesena_primka(conn: fdb.Connection, id_tvrtke: int, brotp: str) -> Optional[int]:
+    """
+    Provjerava postoji li već GASZG zapis (VK=408, nestornirani) s istim
+    dobavljačem (IDTVRTKE) i istim brojem računa dobavljača (BROTP) - ovo
+    hvata slučaj kad je operater isti račun već RUČNO unio kroz iSustav
+    (mimo ove aplikacije), pa ga ERACUN_PRIMKE evidencija ne bi prepoznala
+    (ta tablica bilježi samo uvoze KROZ ovu aplikaciju).
+    Vraća BRDOK postojećeg zapisa, ili None ako nema podudaranja.
+    """
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT BRDOK FROM GASZG
+        WHERE VK = ? AND IDTVRTKE = ? AND BROTP = ?
+          AND (STORNO IS NULL OR STORNO <> 'T')
+        """,
+        (VK_PRIMKA_ERACUN, id_tvrtke, brotp),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def save_eracun_primka(conn: fdb.Connection, ref_key: str, id_kupca: int, broj_primke: int) -> None:
     """
     Upisuje evidenciju da je račun uvezen/proknjižen, zajedno s brojem

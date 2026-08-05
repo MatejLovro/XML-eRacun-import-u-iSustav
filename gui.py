@@ -128,7 +128,7 @@ class StavkaRow:
 
     def _apply_existing_veza(self):
         """Ako u ERACUN_VEZE već postoji mapiranje za ovog dobavljača/šifru, popuni redak."""
-        veza = db.fetch_veza(self.app.conn, self.app.id_tvrtke, self.stavka.sifra_dobavljaca)
+        veza = db.fetch_veza(self.app.conn, self.app.id_tvrtke, self.stavka.kljuc_mapiranja)
         if veza:
             self.id_robe = veza["idrobe"]
             self.var_naziv_artikla.set(veza["naziv_robe"])
@@ -486,6 +486,19 @@ class App:
             if not nastavi:
                 return
 
+        rucno_broj = db.fetch_rucno_unesena_primka(self.conn, self.id_tvrtke, zaglavlje.broj_dokumenta)
+        if rucno_broj is not None:
+            nastavi = messagebox.askyesno(
+                "Račun je već ručno unesen",
+                f"Račun broj {zaglavlje.broj_dokumenta} od dobavljača {naziv_tvrtke} "
+                f"već postoji u sustavu kao ručno unesena primka pod brojem "
+                f"{rucno_broj}.\n\n"
+                f"Želite li XML datoteku svejedno učitati na formu (bez mogućnosti "
+                f"ponovnog knjiženja)?",
+            )
+            if not nastavi:
+                return
+
         self.zaglavlje = zaglavlje
         self.xml_path = path
 
@@ -577,6 +590,20 @@ class App:
             )
             return
 
+        # Čvrsta provjera protiv RUČNO unesenih računa (mimo ove aplikacije) -
+        # ERACUN_PRIMKE ih ne bilježi, pa tražimo izravno u GASZG po
+        # dobavljaču + broju računa.
+        rucno_broj = db.fetch_rucno_unesena_primka(
+            self.conn, self.id_tvrtke, self.zaglavlje.broj_dokumenta
+        )
+        if rucno_broj is not None:
+            messagebox.showerror(
+                "Račun je već ručno unesen",
+                f"Račun broj {self.zaglavlje.broj_dokumenta} od ovog dobavljača već "
+                f"postoji u sustavu kao ručno unesena primka pod brojem {rucno_broj}.",
+            )
+            return
+
         try:
             for row in self.rows:
                 if row.var_ne_unosi.get():
@@ -584,7 +611,7 @@ class App:
                 db.save_veza(
                     self.conn,
                     id_tvrtke=self.id_tvrtke,
-                    sifra_dobavljaca=row.stavka.sifra_dobavljaca,
+                    sifra_dobavljaca=row.stavka.kljuc_mapiranja,
                     naziv_dobavljaca=row.stavka.naziv_dobavljaca,
                     kol_dobavljaca=row.stavka.kolicina,
                     id_robe=row.id_robe,
